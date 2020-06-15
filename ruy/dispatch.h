@@ -170,6 +170,38 @@ void CreatePackedMatrix(Side side, const KernelLayout& kernel_layout,
   packed->zero_point = Pack<PackedScalar, Scalar>(src.zero_point);
 }
 
+template <typename KernelType>
+struct ValidateKernelPathImpl {
+  static void Run(Path) {
+    // In the generic case, do nothing, path fallbacks are normal.
+  }
+};
+
+#if RUY_DCHECK_IS_ENABLED
+template <Path ThePath, typename SrcScalar, typename AccumScalar,
+          typename DstScalar>
+struct ValidateKernelPathImpl<Kernel<ThePath, SrcScalar, SrcScalar, DstScalar,
+                                     MulParams<AccumScalar, DstScalar>>>
+    final {
+  using KernelType = Kernel<ThePath, SrcScalar, SrcScalar, DstScalar,
+                            MulParams<AccumScalar, DstScalar>>;
+  static void Run(Path expected_path) {
+    static constexpr bool kSrcScalarTypeSupportsFastKernels =
+        std::is_same<SrcScalar, float>::value ||
+        std::is_same<SrcScalar, std::int8_t>::value ||
+        std::is_same<SrcScalar, std::uint8_t>::value;
+    if (kSrcScalarTypeSupportsFastKernels) {
+      RUY_DCHECK_EQ(expected_path, KernelType::kPath);
+    }
+  }
+};
+#endif
+
+template <typename KernelType>
+void ValidateKernelPath(Path expected_path) {
+  ValidateKernelPathImpl<KernelType>::Run(expected_path);
+}
+
 template <Path ThePath, typename LhsScalar, typename RhsScalar,
           typename DstScalar, typename MulParamsType>
 void PopulateTrMulParams(TrMulParams* params) {
@@ -207,8 +239,8 @@ void PopulateTrMulParams(TrMulParams* params) {
       &RunPack<ThePath, LhsKernelLayout, LhsScalar, PackedLhsScalar>;
   params->run_pack[Side::kRhs] =
       &RunPack<ThePath, RhsKernelLayout, RhsScalar, PackedRhsScalar>;
-  params->run_kernel = &RunKernel<ThePath, PackedLhsScalar, PackedRhsScalar,
-                                  DstScalar, MulParamsType>;
+  params->run_kernel = &RunKernel<Kernel>;
+  ValidateKernelPath<Kernel>(ThePath);
 }
 
 // PopulateTrMulParamsAllCompiledPaths calls into one of multiple

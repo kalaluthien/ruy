@@ -29,31 +29,55 @@ limitations under the License.
 
 namespace ruy {
 
+template <typename KernelType>
+class RunKernelImpl;
+
+// Writing this as a partial specalization allows us to get for free the
+// "structured binding" of the Kernel<...> type to its template parameters,
+// without requiring each Kernel specialization to redeclare its own parameters
+// as member constants and types.
 template <Path ThePath, typename LhsScalar, typename RhsScalar,
           typename DstScalar, typename MulParamsType>
-void RunKernelTyped(Tuning tuning, const PMat<LhsScalar>& lhs,
-                    const PMat<RhsScalar>& rhs, const MulParamsType& mul_params,
-                    int start_row, int start_col, int end_row, int end_col,
-                    Mat<DstScalar>* dst) {
-  using Kernel =
-      Kernel<ThePath, LhsScalar, RhsScalar, DstScalar, MulParamsType>;
-  Kernel kernel(tuning);
-  using LhsLayout = typename Kernel::LhsLayout;
-  using RhsLayout = typename Kernel::RhsLayout;
-  // end_row and end_col may be larger than dst dimensions.
-  // that is because kernels write directly to the destination matrix, whose
-  // dimensions may not be a multiple of the kernel dimensions, and we try to
-  // keep this annoyance localized as an implementation detail in kernels,
-  // by allowing to pass rounded-up values down as far as possible.
-  // These assertions encode the contract.
-  RUY_DCHECK_LE(0, start_row);
-  RUY_DCHECK_LE(start_row, end_row);
-  RUY_DCHECK_LT(end_row, dst->layout.rows + LhsLayout::kCols);
-  RUY_DCHECK_EQ((end_row - start_row) % LhsLayout::kCols, 0);
-  RUY_DCHECK_LE(0, start_col);
-  RUY_DCHECK_LE(start_col, end_col);
-  RUY_DCHECK_LT(end_col, dst->layout.cols + RhsLayout::kCols);
-  RUY_DCHECK_EQ((end_col - start_col) % RhsLayout::kCols, 0);
+class RunKernelImpl<
+    Kernel<ThePath, LhsScalar, RhsScalar, DstScalar, MulParamsType>>
+    final {
+ public:
+  static void Run(Tuning tuning, const SidePair<PEMat>& src, void* mul_params,
+                  const SidePair<int>& start, const SidePair<int>& end,
+                  EMat* dst) {
+    Mat<DstScalar> unerased_dst = UneraseType<DstScalar>(*dst);
+    RunUnerased(tuning, UneraseType<LhsScalar>(src[Side::kLhs]),
+                UneraseType<RhsScalar>(src[Side::kRhs]),
+                *static_cast<const MulParamsType*>(mul_params),
+                start[Side::kLhs], start[Side::kRhs], end[Side::kLhs],
+                end[Side::kRhs], &unerased_dst);
+  }
+
+ private:
+  static void RunUnerased(Tuning tuning, const PMat<LhsScalar>& lhs,
+                          const PMat<RhsScalar>& rhs,
+                          const MulParamsType& mul_params, int start_row,
+                          int start_col, int end_row, int end_col,
+                          Mat<DstScalar>* dst) {
+    using Kernel =
+        Kernel<ThePath, LhsScalar, RhsScalar, DstScalar, MulParamsType>;
+    Kernel kernel(tuning);
+    using LhsLayout = typename Kernel::LhsLayout;
+    using RhsLayout = typename Kernel::RhsLayout;
+    // end_row and end_col may be larger than dst dimensions.
+    // that is because kernels write directly to the destination matrix, whose
+    // dimensions may not be a multiple of the kernel dimensions, and we try to
+    // keep this annoyance localized as an implementation detail in kernels,
+    // by allowing to pass rounded-up values down as far as possible.
+    // These assertions encode the contract.
+    RUY_DCHECK_LE(0, start_row);
+    RUY_DCHECK_LE(start_row, end_row);
+    RUY_DCHECK_LT(end_row, dst->layout.rows + LhsLayout::kCols);
+    RUY_DCHECK_EQ((end_row - start_row) % LhsLayout::kCols, 0);
+    RUY_DCHECK_LE(0, start_col);
+    RUY_DCHECK_LE(start_col, end_col);
+    RUY_DCHECK_LT(end_col, dst->layout.cols + RhsLayout::kCols);
+    RUY_DCHECK_EQ((end_col - start_col) % RhsLayout::kCols, 0);
 #if RUY_OPT(FAT_KERNEL)
   kernel.Run(lhs, rhs, mul_params, start_row, start_col, end_row, end_col, dst);
 #else
@@ -66,26 +90,22 @@ void RunKernelTyped(Tuning tuning, const PMat<LhsScalar>& lhs,
     }
   }
 #endif
-}
+  }
+};
 
 // Main entry point for kernels.
-template <Path ThePath, typename LhsScalar, typename RhsScalar,
-          typename DstScalar, typename MulParamsType>
+template <typename KernelType>
 void RunKernel(Tuning tuning, const SidePair<PEMat>& src, void* mul_params,
                const SidePair<int>& start, const SidePair<int>& end,
                EMat* dst) {
-  Mat<DstScalar> mdst = UneraseType<DstScalar>(*dst);
-  RunKernelTyped<ThePath, LhsScalar, RhsScalar, DstScalar, MulParamsType>(
-      tuning, UneraseType<LhsScalar>(src[Side::kLhs]),
-      UneraseType<RhsScalar>(src[Side::kRhs]),
-      *static_cast<const MulParamsType*>(mul_params), start[Side::kLhs],
-      start[Side::kRhs], end[Side::kLhs], end[Side::kRhs], &mdst);
+  RunKernelImpl<KernelType>::Run(tuning, src, mul_params, start, end, dst);
 }
 
 template <typename LhsScalar, typename RhsScalar, typename DstScalar,
           typename MulParamsType>
 struct Kernel<Path::kStandardCpp, LhsScalar, RhsScalar, DstScalar,
               MulParamsType> {
+  static constexpr Path kPath = Path::kStandardCpp;
   using AccumScalar = typename MulParamsType::AccumScalar;
   using LhsLayout = typename MulParamsType::StandardCppKernelLhsLayout;
   using RhsLayout = typename MulParamsType::StandardCppKernelRhsLayout;
